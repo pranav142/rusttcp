@@ -25,12 +25,12 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-ip address add 10.0.0.1/24 dev tun0 &
+ip address add 10.0.0.1 peer 10.0.0.2 dev tun0 &
 if [ $? -ne 0 ]; then 
     echo "Failed to add ip address"
     exit 1
 else
-    echo "tun0 interface belongs to address 10.0.0.x"
+    echo "kernels address to tun0 is 10.0.0.1 programs address to tun0 is 10.0.0.2"
 fi
 
 wait "$tcp_pid"
