@@ -39,11 +39,6 @@ impl Protocol {
     }
 }
 
-const MTU: usize = 1504;
-
-fn u16_from_u8(buf: &[u8], index: usize) -> u16 {
-    ((buf[index] as u16) << 8) | buf[index + 1] as u16
-}
 
 // If index and index + 1 are out of bounds then this
 // will lead to undefined behavior.
@@ -66,74 +61,7 @@ unsafe fn u32_from_buf_unchecked(buf: &[u8], index: usize) -> u32 {
     total
 }
 
-fn u32_from_u8(buf: &[u8], index: usize) -> u32 {
-    let mut total = 0;
-    for offset in 0..4 {
-        total <<= 8;
-        total |= buf[index + offset] as u32;
-    }
-    total
-}
-
-struct IcmpEcho<'a> { 
-    buf: &'a mut [u8],
-    /// byte length of entire icmp packet
-    length: usize,
-}
-
-enum IcmpType { 
-    Echo,
-    EchoReply,
-}
-
-impl<'a> IcmpEcho<'a> { 
-    fn new(buf: &'a mut [u8], length: usize) -> Self { 
-        Self {
-            buf,
-            length,
-        }
-    }
-
-    fn icmp_type(&self) -> IcmpType { 
-        let icmp_type = self.buf[0];
-
-        if icmp_type == 8 { 
-            return IcmpType::Echo;
-        }
-
-        IcmpType::EchoReply
-    } 
-
-    fn set_icmp_type(&mut self, icmp_type: IcmpType) { 
-        match icmp_type {
-            IcmpType::Echo => self.buf[0] = 8, 
-            IcmpType::EchoReply => self.buf[1] = 0,
-        }
-    }
-}
-
-enum Payload<'a> {   
-    IcmpEcho(IcmpEcho<'a>), 
-}
-
-impl<'a> Payload<'a> { 
-    fn new(ip_buf: &'a [u8], payload_buf: &'a mut [u8]) -> Option<Self> { 
-        let protocol = ip_buf[13];
-        let ihl = (ip_buf[4] & 0xF) * 4;
-
-        if protocol == 1 { 
-            let ip_length = u16_from_u8(ip_buf, 6);
-            let icmp_length = ip_length - (ihl as u16);
-
-            if payload_buf[0] == 8 || payload_buf[0] == 0 {
-                return Some(Payload::IcmpEcho(IcmpEcho::new(payload_buf, icmp_length as usize)));
-            }
-        }
-
-        None
-    }
-}
-
+const MTU: usize = 1504;
 const MIN_IP_LEN: usize = 20;
 
 struct Ipv4HeaderSlice<'a> { 
@@ -278,17 +206,6 @@ impl<'a> Ipv4HeaderSlice<'a> {
     }
 }
 
-fn set_ipv4_to_buf(buf: &mut [u8], addr: Ipv4Addr, index: usize) { 
-    let addr_bits = addr.to_bits();
-
-    for i in 0..4 {
-        let shift = 24 - i * 8;
-        let src_byte = (addr_bits & (0xFF << shift)) >> shift;
-        buf[index + i] = src_byte as u8;
-    }
-}
-
-
 #[derive(Debug)]
 struct Ipv4Header {
     tos: u8,
@@ -379,82 +296,6 @@ fn ones_complement_sum(a: u16, b: u16) -> u16 {
     }
 
     sum as u16
-}
-
-pub fn compute_ip_checksum(buf: &[u8]) -> u16 { 
-    let mut total = 0;
-    let header_size_bytes = (buf[4] & 0xF) * 4;
-
-    // Offset by 4 so we do not count the OS flags 
-    // as part of the checksum
-    let offset = 4;
-    let end_index = header_size_bytes + offset;
-
-    for i in (offset..end_index).step_by(2) {
-        // skip the checksum bytes in the header
-        if i == 14 {
-            continue;
-        }
-
-        let header_word = u16_from_u8(buf, i.into());
-        total = ones_complement_sum(total, header_word);
-    }
-
-    !total
-}
-
-// TODO: 
-// Be able to parse ICMP request
-// BE able to respond ot ICMP echo request with echo reply
-const ECHO_MESSAGE: u8 = 8;
-
-#[derive(Debug)]
-struct Echo {
-    echo_type: u8,
-    code: u8,
-    checksum: u16,
-    identifier: u16, 
-    sequence_number: u16,
-}
-
-#[derive(Debug)]
-enum ICMP {
-    Echo(Echo),
-    EchoReply(Echo),
-}
-
-fn compute_echo_checksum(buf: &[u8]) -> u16 {
-    let sum = ones_complement_sum(u16_from_u8(buf, 24), u16_from_u8(buf, 28));
-    ones_complement_sum(sum, u16_from_u8(buf, 30))
-}
-
-impl ICMP { 
-    fn from_buf(buf: &[u8]) -> Option<Self>{
-        let icmp_type = buf[24];
-
-        match icmp_type {
-            0 | 8 => {
-                let echo = Echo {
-                    echo_type: icmp_type,
-                    code: buf[25],
-                    checksum: u16_from_u8(buf, 26),
-                    identifier: u16_from_u8(buf, 28),
-                    sequence_number: u16_from_u8(buf, 30),
-                };
-
-
-                if icmp_type == 8 {
-                    return Some(Self::Echo(echo))
-                }
-
-                Some(Self::EchoReply(echo))
-            },
-            _ => {
-                println!("Cannot deserialize unsupported or invalid icmp type: {icmp_type}");
-                None
-            }
-        }
-    }
 }
 
 struct Icmpv4Slice<'a> {
@@ -667,83 +508,13 @@ fn process_packet(ip: &Ipv4HeaderSlice<'_>, interface: &Iface, buf: &[u8]) {
 
             match icmp_opt { 
                 Some(icmp) => { 
-                    // println!("\nrecieved icmp:\n {:?}", icmp);
                     process_ping(ip, &icmp, interface)
                 },
                 None => println!("Failed to create ICMP packet"),
             }
-            // let icmp_type = buf[24];
-
-
-            // if icmp_type != ECHO_MESSAGE { 
-            //     return;
-            // }
-
-            // let src_ip = ip.src_ip.to_bits();
-            // let dst_ip = ip.dst_ip.to_bits();
-
-            // // this is sus that we do this manually
-            // for i in 0..4 {
-            //     let shift = i * 8;
-            //     let src_byte = (src_ip & (0xFF << shift)) >> shift;
-            //     buf[23 - i] = src_byte as u8;
-            //     let dst_byte = (dst_ip & (0xFF << shift)) >> shift;
-            //     buf[19 - i] = dst_byte as u8;
-            // }
-
-            // let checksum = compute_ip_checksum(buf);
-            // buf[14] = ((checksum & 0xFF00) >> 8) as u8;
-            // buf[15] = (checksum & 0xFF) as u8;
-
-            // buf[24] = 0;
-
-
-            // // TODO: need to properly recompute the check sum
-            // let mut total = 0;
-            // let offset = 24;
-            // let icmp_header_length: u16 = 8;
-            // let end_index = icmp_header_length + offset;
-
-            // for i in (offset..end_index).step_by(2) {
-            //     if i == 26 {
-            //         continue;
-            //     }
-
-            //     total = ones_complement_sum(total, u16_from_u8(buf, i.into()))
-            // }
-
-            // let mut data_start_index = end_index;
-            // let data_length = ip.length - (ip.ihl as u16 * 4) - icmp_header_length;
-
-            // let end_index = data_start_index + data_length;
-
-            // if data_length % 2 == 1 { 
-            //     let zero_pad = (buf[data_start_index as usize] as u16) << 8;
-            //     total = ones_complement_sum(total, zero_pad);
-            //     data_start_index += 1;
-            // }
-            // 
-            // for i in (data_start_index..end_index).step_by(2) {
-            //     total = ones_complement_sum(total, u16_from_u8(buf, i.into()));
-            // }
-
-            // total = !total;
-
-            // buf[26] = ((total & 0xFF00) >> 8) as u8;
-            // buf[27] = (total & 0xFF) as u8;
-
-            // println!("\nconstructed icmp:\n {:?}", ICMP::from_buf(buf));
-
-            // let new_ip = IP::from_buf(buf);
-            // println!("\nnew ip:\n {:?}", new_ip);
-
-            // let result = interface.send(buf);
-            // match result {
-            // }
-
         },
         _ => {
-            println!("Protocol not supported");
+            println!("Protocol: {:?} not supported", ip.protocol());
         }
     }
 }
@@ -763,12 +534,11 @@ fn main() {
                 let ip_opt = Ipv4HeaderSlice::from_buf(&buf[4..byte_len]);
                 match ip_opt { 
                     Some(ip) => {
-                        // println!("Successfully recieved {} bytes, message ID: {}", byte_len, msg_id);
-                        // println!("IP: {:?}", ip);
+                        println!("\n\nSuccessfully recieved {} bytes, message ID: {}", byte_len, msg_id);
                         process_packet(&ip, &interface, &buf[4..byte_len]);
                     }
                     None => {
-                        println!("Ignoring Packet");
+                        println!("\n\nIgnoring Packet");
                     }
                 }
             },
