@@ -1,5 +1,12 @@
 use core::panic;
-use std::{fmt::{Debug, Formatter}, net::Ipv4Addr, vec, fmt};
+use std::{fmt::{self, Debug, Formatter}, net::Ipv4Addr, vec};
+
+// TODO: Clean up magical numbers
+// TODO: Add proper checks for protocols we dont support
+// TODO: Add better error messages when we are unable to create a type of packet
+// TODO: Better length slicing? this way we can precisely give a Buffer range that is exactly the
+// size of the packet rather than the entire buffer. This will lead to cleaner debugging
+// TODO: Potentially turn options into a struct for cleaner interactions
 
 use tun_tap::{Iface, Mode::Tun};
 
@@ -12,7 +19,6 @@ enum Protocol {
 }
 
 impl Protocol {
-    // TODO: Clean up magical numbers!
     fn from_bits(bits: u8) -> Self {
         if bits == 1 {
             return Self::Icmp;
@@ -284,6 +290,10 @@ impl Ipv4Header {
             *buf.get_unchecked_mut(11) = (checksum & 0xFF) as u8;
         }
     }
+
+    fn header_length(&self) -> u16 { 
+        20
+    }
 }
 
 fn ones_complement_sum(a: u16, b: u16) -> u16 {
@@ -308,13 +318,13 @@ enum Icmpv4Type {
     EchoReply,
 }
 
-const MIN_ICMP_HEADER_SIZE: usize = 8;
+const ICMP_HEADER_SIZE: usize = 8;
 const ECHO_TYPE: u8 = 8;
 const ECHO_REPLY_TYPE: u8 = 0;
 
 impl<'a> Icmpv4Slice<'a> { 
     fn from_buf(buf: &'a [u8]) -> Option<Self> { 
-        if buf.len() < MIN_ICMP_HEADER_SIZE { 
+        if buf.len() < ICMP_HEADER_SIZE { 
             return None; 
         }
     
@@ -370,7 +380,7 @@ impl<'a> Icmpv4Slice<'a> {
     }
 
     fn payload(&self) -> &'a [u8] { 
-        &self.buf[MIN_ICMP_HEADER_SIZE..]
+        &self.buf[ICMP_HEADER_SIZE..]
     }
 }
 
@@ -384,7 +394,7 @@ struct Icmpv4<'a> {
 
 impl Icmpv4<'_> { 
     fn to_buf(&self, buf: &mut [u8]) { 
-        if buf.len() < (MIN_ICMP_HEADER_SIZE + self.payload.len()) { 
+        if buf.len() < (ICMP_HEADER_SIZE + self.payload.len()) { 
             panic!("Provided buffer is not large enough for ICMP v4 header and payload");
         }
 
@@ -411,7 +421,7 @@ impl Icmpv4<'_> {
             *buf.get_unchecked_mut(7) = (self.sequence_number & 0xFF) as u8;
         }
 
-        for (i, val) in self.payload.iter().enumerate() { 
+       for (i, val) in self.payload.iter().enumerate() { 
             unsafe { 
                 *buf.get_unchecked_mut(i + 8) = *val;
             } 
@@ -419,9 +429,10 @@ impl Icmpv4<'_> {
         }
 
         let mut checksum = 0;
-        let icmp_length = MIN_ICMP_HEADER_SIZE + self.payload.len();
+        let icmp_length = ICMP_HEADER_SIZE + self.payload.len();
 
-        // this checksum calculation is wrong
+        // FIXME: this checksum calculation is wrong
+        // when the length is odd we need to do some padding
         for i in (0..icmp_length).step_by(2) { 
             let word = unsafe { 
                 u16_from_buf_unchecked(buf, i)
@@ -459,6 +470,7 @@ fn process_ping(ip: &Ipv4HeaderSlice, icmp: &Icmpv4Slice<'_>, interface: &Iface)
         return;
     } 
 
+    // swap src and dst ip 
     let ipv4_header = Ipv4Header { 
         tos: ip.tos(),
         length: ip.length(),
@@ -472,7 +484,6 @@ fn process_ping(ip: &Ipv4HeaderSlice, icmp: &Icmpv4Slice<'_>, interface: &Iface)
         dst_ip: ip.src_ip(),
     };
 
-    // need to copy over the pay load?!
     let icmp_header = Icmpv4 {
         icmp_type: Icmpv4Type::EchoReply,
         code: icmp.code(),
@@ -484,8 +495,9 @@ fn process_ping(ip: &Ipv4HeaderSlice, icmp: &Icmpv4Slice<'_>, interface: &Iface)
     unsafe { 
         *response.get_unchecked_mut(2) = 8;
     }
+
     ipv4_header.to_buf(&mut response[4..]);
-    icmp_header.to_buf(&mut response[24..]);
+    icmp_header.to_buf(&mut response[usize::from(4 + ipv4_header.header_length())..]);
 
 
     let result = interface.send(&response);
@@ -500,25 +512,399 @@ fn process_ping(ip: &Ipv4HeaderSlice, icmp: &Icmpv4Slice<'_>, interface: &Iface)
 }
 
 fn process_packet(ip: &Ipv4HeaderSlice<'_>, interface: &Iface, buf: &[u8]) {
-
     match ip.protocol() {
         Protocol::Icmp => {
-            let icmp_buf = &buf[usize::from(ip.header_length())..];
-            let icmp_opt = Icmpv4Slice::from_buf(icmp_buf);
+            let icmp_opt = Icmpv4Slice::from_buf(buf);
 
             match icmp_opt { 
                 Some(icmp) => { 
                     process_ping(ip, &icmp, interface)
                 },
-                None => println!("Failed to create ICMP packet"),
+                None => println!("\nFailed to create ICMP packet"),
             }
+        },
+        Protocol::Tcp => {
+            let tcp_opt = TcpHeaderSlice::from_buf(buf);
+
+            match tcp_opt {
+                Some(tcp) => { 
+                    let mut tmp = [0; MTU + 4];
+
+                    let header = TcpHeader { 
+                        src_port: tcp.src_port(), 
+                        dst_port: tcp.dst_port(), 
+                        seq_number: tcp.seq_number(), 
+                        ack_number: tcp.ack_number(),
+                        cwr: tcp.cwr(), 
+                        ece: tcp.ece(), 
+                        urg: tcp.urg(), 
+                        ack: tcp.ack(), 
+                        psh: tcp.psh(),
+                        rst: tcp.rst(), 
+                        syn: tcp.syn(), 
+                        fin: tcp.fin(), 
+                        window: tcp.window(), 
+                        psuedo_header: PsuedoHeader::from_ip(ip),
+                        urgent_pointer: tcp.urgent_pointer(), 
+                        options: tcp.options(),
+                        data: tcp.data(),
+                    }; 
+                    header.to_buf(&mut tmp);
+                    
+                    println!("\nOriginal:\n{:?}", tcp);
+                    println!("\nConstructed:\n{:?}", TcpHeaderSlice::from_buf(&tmp));
+
+                }, 
+                None => println!("\nFailed to create TCP packet"),
+            }
+            println!("Sucessfully recieved TCP packet");
+
         },
         _ => {
             println!("Protocol: {:?} not supported", ip.protocol());
         }
     }
 }
- 
+
+struct TcpHeaderSlice<'a> { 
+    buf: &'a [u8]
+}
+
+const MIN_TCP_HEADER_LENGTH: usize = 20;
+
+impl<'a> TcpHeaderSlice<'a> { 
+    fn from_buf(buf: &'a [u8]) -> Option<Self> {
+        if buf.len() < MIN_TCP_HEADER_LENGTH { 
+            return None;
+        }
+
+        let data_offset = unsafe { 
+            *buf.get_unchecked(12) >> 4
+        };
+
+        if buf.len() < usize::from(data_offset * 4)  { 
+            return None;
+        }
+
+        Some(Self {
+            buf
+        })
+    }
+
+    fn src_port(&self) -> u16 { 
+        unsafe { 
+            u16_from_buf_unchecked(self.buf, 0)
+        }
+    }
+
+    fn dst_port(&self) -> u16 { 
+        unsafe { 
+            u16_from_buf_unchecked(self.buf, 2)
+        }
+    }
+
+    fn seq_number(&self) -> u32 {
+        unsafe { 
+            u32_from_buf_unchecked(self.buf, 4)
+        }
+    }
+
+    fn ack_number(&self) -> u32 { 
+        unsafe { 
+            u32_from_buf_unchecked(self.buf, 8)
+        }
+    }
+
+    // 32 bit words in TCP header including Options
+    fn data_offset(&self) -> u8 { 
+        unsafe { 
+            *self.buf.get_unchecked(12) >> 4
+        }
+    }
+
+    fn cwr(&self) -> bool { 
+        unsafe {
+            (*self.buf.get_unchecked(13) & (1 << 7)) > 1
+        }
+    }
+
+    fn ece(&self) -> bool { 
+        unsafe { 
+            (*self.buf.get_unchecked(13) & (1 << 6)) > 1
+        }
+    }
+
+    fn urg(&self) -> bool { 
+        unsafe { 
+            (*self.buf.get_unchecked(13) & (1 << 5)) > 1
+        }
+    }
+
+    fn ack(&self) -> bool { 
+        unsafe { 
+            (*self.buf.get_unchecked(13) & (1 << 4)) > 1
+        }
+
+    }
+
+    fn psh(&self) -> bool { 
+        unsafe { 
+            (*self.buf.get_unchecked(13) & (1 << 3)) > 1
+        }
+
+    }
+
+    fn rst(&self) -> bool { 
+        unsafe { 
+            (*self.buf.get_unchecked(13) & (1 << 2)) > 1
+        }
+
+    }
+
+    fn syn(&self) -> bool { 
+        unsafe { 
+            (*self.buf.get_unchecked(13) & (1 << 1)) > 1
+        }
+
+    }
+
+    fn fin(&self) -> bool {
+        unsafe { 
+            (*self.buf.get_unchecked(13) & 1) == 1
+        }
+    }
+
+    fn window(&self) -> u16 { 
+        unsafe { 
+            u16_from_buf_unchecked(self.buf, 14)
+        }
+    }
+
+    fn checksum(&self) -> u16 {
+        unsafe { 
+            u16_from_buf_unchecked(self.buf, 16)
+        }
+    }
+
+    fn urgent_pointer(&self) -> u16 {
+        unsafe { 
+            u16_from_buf_unchecked(self.buf, 18)
+        }
+    }
+
+    fn options(&self) -> &'a [u8] { 
+        let data_offset = unsafe { 
+            *self.buf.get_unchecked(12) >> 4
+        };
+        let data_offset = usize::from(data_offset * 4);
+
+        &self.buf[MIN_TCP_HEADER_LENGTH..data_offset]
+    }
+
+    fn data(&self) -> &'a [u8] {
+        let data_offset = unsafe { 
+            *self.buf.get_unchecked(12) >> 4
+        };
+        let data_offset = usize::from(data_offset * 4);
+
+        &self.buf[data_offset..]
+    }
+}
+
+impl Debug for TcpHeaderSlice<'_> { 
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result { 
+        f.debug_struct("TcpHeaderSlice")
+            .field("source port", &self.src_port())
+            .field("destination port", &self.dst_port())
+            .field("sequence number", &self.seq_number())
+            .field("acknowledgment number", &self.ack_number())
+            .field("flag (cwr)", &self.cwr())
+            .field("flag (ece)", &self.ece())
+            .field("flag (urg)", &self.urg())
+            .field("flag (ack)", &self.ack())
+            .field("flag (psh)", &self.psh())
+            .field("flag (rst)", &self.rst())
+            .field("flag (syn)", &self.syn())
+            .field("flag (fin)", &self.fin())
+            .field("checksum", &self.checksum())
+            .field("data offset", &self.data_offset())
+            .field("window", &self.window())
+            .field("urgent pointer", &self.urgent_pointer())
+            .finish()
+    }
+}
+
+struct PsuedoHeader { 
+    src_addr: Ipv4Addr, 
+    dst_addr: Ipv4Addr, 
+    protocol: Protocol,
+    tcp_length: u16,
+}
+
+impl PsuedoHeader { 
+    fn from_ip(ip: &Ipv4HeaderSlice) -> Self { 
+        let tcp_length = ip.length() - (ip.header_length() as u16);
+
+        Self {
+            src_addr: ip.src_ip(), 
+            dst_addr: ip.dst_ip(), 
+            protocol: ip.protocol(), 
+            tcp_length
+        }
+    }
+}
+
+// If index and index + 1 are outside of the buffers length 
+// then this will lead to undetermined behavior
+unsafe fn u16_to_buf_unchecked(buf: &mut [u8], index: usize, val: u16) { 
+    unsafe { 
+        *buf.get_unchecked_mut(index) = (val >> 8) as u8;
+        *buf.get_unchecked_mut(index + 1) = (val & 0xFF) as u8;
+    }
+}
+
+// If index..index + 3 are outside of the buffers length 
+// then this will lead to undetermined behavior
+unsafe fn u32_to_buf_unchecked(buf: &mut [u8], index: usize, val: u32)  { 
+    for i in 0..4 { 
+        let shift = 24 - (i * 8);
+        unsafe {
+            *buf.get_unchecked_mut(index + i) = ((val >> shift) & 0xFF) as u8;
+        };
+    }
+}
+
+struct TcpHeader<'a> { 
+    src_port: u16, 
+    dst_port: u16, 
+    seq_number: u32, 
+    ack_number: u32,
+    cwr: bool, 
+    ece: bool, 
+    urg: bool, 
+    ack: bool, 
+    psh: bool,
+    rst: bool, 
+    syn: bool, 
+    fin: bool, 
+    window: u16, 
+    psuedo_header: PsuedoHeader,
+    urgent_pointer: u16, 
+    options: &'a [u8],
+    data: &'a [u8],
+}
+
+impl Debug for TcpHeader<'_> { 
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result { 
+        f.debug_struct("TcpHeaderSlice")
+            .field("source port", &self.src_port)
+            .field("destination port", &self.dst_port)
+            .field("sequence number", &self.seq_number)
+            .field("acknowledgment number", &self.ack_number)
+            .field("flag (cwr)", &self.cwr)
+            .field("flag (ece)", &self.ece)
+            .field("flag (urg)", &self.urg)
+            .field("flag (ack)", &self.ack)
+            .field("flag (psh)", &self.psh)
+            .field("flag (rst)", &self.rst)
+            .field("flag (syn)", &self.syn)
+            .field("flag (fin)", &self.fin)
+            .field("window", &self.window)
+            .field("urgent pointer", &self.urgent_pointer)
+            .finish()
+    }
+}
+
+impl TcpHeader<'_> {
+    // FIXME: let us have this return a error
+    // TODO: need to have this sudo header shit
+    fn to_buf(&self, buf: &mut [u8]) { 
+        let tcp_size = MIN_TCP_HEADER_LENGTH + self.options.len() + self.data.len();
+
+        if buf.len() < (tcp_size) { 
+            return;
+        }
+
+        let data_offset = (MIN_TCP_HEADER_LENGTH + self.options.len()) / 4;
+        unsafe { 
+            u16_to_buf_unchecked(buf, 0, self.src_port);
+
+            u16_to_buf_unchecked(buf, 2, self.dst_port);
+
+            u32_to_buf_unchecked(buf, 4, self.seq_number);
+            u32_to_buf_unchecked(buf, 8, self.ack_number);
+
+            *buf.get_unchecked_mut(12) = (data_offset << 4) as u8; 
+
+            *buf.get_unchecked_mut(13) = 0;
+            *buf.get_unchecked_mut(13) |= (self.cwr as u8) << 7;
+            *buf.get_unchecked_mut(13) |= (self.ece as u8) << 6;
+            *buf.get_unchecked_mut(13) |= (self.urg as u8) << 5;
+            *buf.get_unchecked_mut(13) |= (self.ack as u8) << 4;
+            *buf.get_unchecked_mut(13) |= (self.psh as u8) << 3;
+            *buf.get_unchecked_mut(13) |= (self.rst as u8) << 2;
+            *buf.get_unchecked_mut(13) |= (self.syn as u8) << 1;
+            *buf.get_unchecked_mut(13) |= self.fin as u8;
+            
+            u16_to_buf_unchecked(buf, 14, self.window);
+            
+            // initialize the checksum to zero
+            u16_to_buf_unchecked(buf, 16, 0);
+
+            u16_to_buf_unchecked(buf, 18, self.urgent_pointer);
+        }
+
+        let mut cur_index = MIN_TCP_HEADER_LENGTH;
+
+        for val in self.options.iter() { 
+            unsafe { 
+                *buf.get_unchecked_mut(cur_index) = *val;
+                cur_index += 1;
+            }
+        }
+
+        for val in self.data.iter() { 
+            unsafe {
+                *buf.get_unchecked_mut(cur_index) = *val; 
+                cur_index += 1;
+            }
+        }
+
+        let src_addr = self.psuedo_header.src_addr.to_bits();
+        let dst_addr = self.psuedo_header.dst_addr.to_bits();
+        
+        // Required to calculate the checksum of a psuedo header
+        let mut checksum = ones_complement_sum((src_addr >> 16) as u16, (src_addr & 0xFFFF) as u16);
+        checksum = ones_complement_sum(checksum, (dst_addr >> 16) as u16);
+        checksum = ones_complement_sum(checksum, (dst_addr & 0xFFFF) as u16);
+        checksum = ones_complement_sum(checksum, self.psuedo_header.protocol.to_bits() as u16);
+        checksum = ones_complement_sum(checksum, self.psuedo_header.tcp_length);
+
+
+        for i in (0..cur_index - 1).step_by(2) { 
+            let word = unsafe { 
+                u16_from_buf_unchecked(buf, i)
+            };
+            checksum = ones_complement_sum(checksum, word);
+        }
+
+        // if there is a odd number of octets add the last octet
+        // with 0 padding to the right
+        if cur_index % 2 == 1 { 
+             let word = unsafe { 
+                 (*buf.get_unchecked_mut(cur_index - 1) as u16) << 8
+             };
+             checksum = ones_complement_sum(checksum, word);
+        }
+
+        checksum = !checksum;
+
+        unsafe { 
+            u16_to_buf_unchecked(buf, 16, checksum);
+        }
+    }
+}
+
 fn main() {
     const BUF_SIZE: usize = 1504;
     let interface = Iface::new("", Tun).expect("Failed to create interface");
@@ -535,10 +921,10 @@ fn main() {
                 match ip_opt { 
                     Some(ip) => {
                         println!("\n\nSuccessfully recieved {} bytes, message ID: {}", byte_len, msg_id);
-                        process_packet(&ip, &interface, &buf[4..byte_len]);
+                        process_packet(&ip, &interface, &buf[usize::from(4 + ip.header_length())..byte_len]);
                     }
                     None => {
-                        println!("\n\nIgnoring Packet");
+                        println!("\n\nIgnoring Ipv6 Packet");
                     }
                 }
             },
