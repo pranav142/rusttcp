@@ -1,3 +1,4 @@
+use crate::parse::ipv4_header::Ipv4Header;
 use crate::parse::protocol::Protocol;
 use crate::parse::utils::{u16_from_buf_unchecked, u32_from_buf_unchecked};
 use std::{
@@ -63,6 +64,21 @@ impl<'a> Ipv4HeaderSlice<'a> {
         Some(Self { buf: ipv4_header })
     }
 
+    // should be able to take any arbitrary data and fill it up
+    pub fn reply(&self) -> Ipv4Header {
+        Ipv4Header {
+            tos: self.tos(),
+            identification: self.identification(),
+            dont_fragment: self.dont_fragment(),
+            more_fragments: self.more_fragments(),
+            fragment_offset: self.fragment_offset(),
+            ttl: self.ttl(),
+            protocol: self.protocol(),
+            src_ip: self.dst_ip(),
+            dst_ip: self.src_ip(),
+        }
+    }
+
     pub fn tos(&self) -> u8 {
         unsafe { *self.buf.get_unchecked(1) }
     }
@@ -119,5 +135,14 @@ impl<'a> Ipv4HeaderSlice<'a> {
         let protocol_bits = unsafe { *self.buf.get_unchecked(9) };
 
         Protocol::from_bits(protocol_bits)
+    }
+
+    fn payload_length(&self) -> usize {
+        usize::from(self.length()) - usize::from(self.header_length())
+    }
+
+    pub fn payload(&self) -> &'a [u8] {
+        &self.buf[usize::from(self.header_length())
+            ..(usize::from(self.header_length()) + self.payload_length())]
     }
 }

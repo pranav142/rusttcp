@@ -4,7 +4,9 @@ pub mod utils;
 
 pub mod ipv4;
 
-pub mod ipv4_slice;
+pub mod ipv4_header;
+
+pub mod ipv4_header_slice;
 
 pub mod icmpv4;
 

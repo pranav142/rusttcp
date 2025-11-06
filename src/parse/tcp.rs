@@ -133,6 +133,11 @@ impl TcpHeader<'_> {
             u16_to_buf_unchecked(buf, 16, checksum);
         }
     }
+
+    /// returns the total length of the TCP Header
+    pub fn length(&self) -> usize {
+        MIN_TCP_HEADER_LENGTH + self.options.len() + self.data.len()
+    }
 }
 
 pub struct PsuedoHeader {

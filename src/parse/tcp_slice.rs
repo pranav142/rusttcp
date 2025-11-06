@@ -87,7 +87,7 @@ impl<'a> TcpHeaderSlice<'a> {
     }
 
     fn options(&self) -> &'a [u8] {
-        let data_offset = unsafe { *self.buf.get_unchecked(12) >> 4 };
+        let data_offset = self.data_offset();
         let data_offset = usize::from(data_offset * 4);
 
         &self.buf[MIN_TCP_HEADER_LENGTH..data_offset]
@@ -95,7 +95,7 @@ impl<'a> TcpHeaderSlice<'a> {
 
     fn data(&self) -> &'a [u8] {
         let data_offset = unsafe { *self.buf.get_unchecked(12) >> 4 };
-        let data_offset = usize::from(data_offset * 4);
+        let data_offset = usize::from(data_offset) * 4;
 
         &self.buf[data_offset..]
     }

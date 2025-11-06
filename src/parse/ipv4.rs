@@ -1,76 +1,26 @@
-use crate::parse::protocol::Protocol;
-use crate::parse::utils::{
-    ones_complement_sum, u16_from_buf_unchecked, u16_to_buf_unchecked, u32_to_buf_unchecked,
-};
-use std::net::Ipv4Addr;
+use crate::parse::icmpv4::Icmpv4;
+use crate::parse::ipv4_header::{IP_HEADER_SIZE, Ipv4Header};
 
-pub const MIN_IP_LEN: usize = 20;
-
-#[derive(Debug)]
-pub struct Ipv4Header {
-    pub tos: u8,
-    pub length: u16,
-    pub identification: u16,
-    pub dont_fragment: bool,
-    pub more_fragments: bool,
-    pub fragment_offset: u16,
-    pub ttl: u8,
-    pub protocol: Protocol,
-    pub src_ip: Ipv4Addr,
-    pub dst_ip: Ipv4Addr,
+pub enum IpPayload<'a> {
+    Icmp(Icmpv4<'a>),
 }
 
-impl Ipv4Header {
-    // TODO: Clean up magic numbers
-    pub fn to_buf(&self, buf: &mut [u8]) {
-        if buf.len() < 20 {
-            panic!("Buffer is not large enough to store header")
-        }
+pub struct Ipv4Packet<'a> {
+    header: Ipv4Header,
+    payload: IpPayload<'a>,
+}
 
-        // FIXME: Eventually we will support all protocols
-        if self.protocol == Protocol::Unsupported {
-            panic!("Cannot create unsupported protocol");
-        }
-
-        let flag_and_frag_offset = self.fragment_offset
-            | ((self.dont_fragment as u16) << 14)
-            | ((self.more_fragments as u16) << 13);
-
-        unsafe {
-            *buf.get_unchecked_mut(0) = (4 << 4) | 5;
-            *buf.get_unchecked_mut(1) = self.tos;
-
-            u16_to_buf_unchecked(buf, 2, self.length);
-            u16_to_buf_unchecked(buf, 4, self.identification);
-            u16_to_buf_unchecked(buf, 6, flag_and_frag_offset);
-
-            *buf.get_unchecked_mut(8) = self.ttl;
-
-            *buf.get_unchecked_mut(9) = self.protocol.to_bits();
-
-            // initialize the checksum to 0
-            u16_to_buf_unchecked(buf, 10, 0);
-
-            u32_to_buf_unchecked(buf, 12, self.src_ip.to_bits());
-            u32_to_buf_unchecked(buf, 16, self.dst_ip.to_bits());
-        }
-
-        let mut checksum = 0;
-        for i in (0..20).step_by(2) {
-            let word = unsafe { u16_from_buf_unchecked(buf, i) };
-
-            checksum = ones_complement_sum(checksum, word);
-        }
-
-        checksum = !checksum;
-
-        unsafe {
-            *buf.get_unchecked_mut(10) = (checksum >> 8) as u8;
-            *buf.get_unchecked_mut(11) = (checksum & 0xFF) as u8;
-        }
+impl<'a> Ipv4Packet<'a> {
+    pub fn new(header: Ipv4Header, payload: IpPayload<'a>) -> Self {
+        Self { header, payload }
     }
 
-    pub fn header_length(&self) -> u16 {
-        20
+    pub fn to_buf(&self, buf: &mut [u8]) {
+        match &self.payload {
+            IpPayload::Icmp(icmpv4) => {
+                let len = self.header.to_buf(buf, icmpv4.length());
+                icmpv4.to_buf(&mut buf[len..]);
+            }
+        }
     }
 }
