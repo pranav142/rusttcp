@@ -20,7 +20,7 @@ impl TunInterface {
 
     pub fn recv<'a>(&'a mut self) -> Result<(Ipv4HeaderSlice<'a>, Tx<'a>)> {
         let _ = self.iface.recv(&mut self.buf)?;
-        let packet = Ipv4HeaderSlice::from_buf(&self.buf).ok_or(InterfaceError::InvalidIpPacket)?; 
+        let packet = Ipv4HeaderSlice::from_buf(&self.buf[4..]).ok_or(InterfaceError::InvalidIpPacket)?; 
         let transmit = Tx { iface: &self.iface };
         Ok((packet, transmit))
     }
@@ -33,8 +33,15 @@ pub struct Tx<'a> {
 impl Tx<'_> { 
     pub fn send(&self, packet: &Ipv4Packet) -> Result<()> {
         let mut buf = [0; MTU];
-        packet.to_buf(&mut buf);
+
+        // TUN Meta Data 
+        unsafe {
+            *buf.get_unchecked_mut(2) = 8;
+        }
+
+        packet.to_buf(&mut buf[4..]);
         self.iface.send(&buf)?;
+
         Ok(())
     }
 }
