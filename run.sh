@@ -1,5 +1,7 @@
 #! /usr/bin/bash
 
+export RUST_BACKTRACE=1
+
 tcp_pid=""
 cleanup() {
     if [ -n tcp_pid ]; then

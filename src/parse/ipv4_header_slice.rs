@@ -53,15 +53,13 @@ impl<'a> Ipv4HeaderSlice<'a> {
             return None;
         }
 
-        let header_length = (ihl as usize) * 4;
-        if buf.len() < header_length {
+        let length = unsafe { u16_from_buf_unchecked(buf, 2) };
+        if buf.len() < usize::from(length) {
+            println!("buf of length: {:?} is not large for ip packet of length {:?}", buf.len(), length);
             return None;
         }
 
-        // safe because header length is in bounds
-        let (ipv4_header, _) = unsafe { buf.split_at_unchecked(header_length) };
-
-        Some(Self { buf: ipv4_header })
+        Some(Self { buf })
     }
 
     // should be able to take any arbitrary data and fill it up

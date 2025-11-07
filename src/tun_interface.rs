@@ -19,22 +19,23 @@ impl TunInterface {
     }
 
     pub fn recv<'a>(&'a mut self) -> Result<(Ipv4HeaderSlice<'a>, Tx<'a>)> {
-        let _ = self.iface.recv(&mut self.buf)?;
-        let packet = Ipv4HeaderSlice::from_buf(&self.buf[4..]).ok_or(InterfaceError::InvalidIpPacket)?; 
+        let byte_len = self.iface.recv(&mut self.buf)?;
+        let packet =
+            Ipv4HeaderSlice::from_buf(&self.buf[4..byte_len]).ok_or(InterfaceError::InvalidIpPacket)?;
         let transmit = Tx { iface: &self.iface };
         Ok((packet, transmit))
     }
 }
 
 pub struct Tx<'a> {
-    iface: &'a Iface
+    iface: &'a Iface,
 }
 
-impl Tx<'_> { 
+impl Tx<'_> {
     pub fn send(&self, packet: &Ipv4Packet) -> Result<()> {
         let mut buf = [0; MTU];
 
-        // TUN Meta Data 
+        // TUN Meta Data
         unsafe {
             *buf.get_unchecked_mut(2) = 8;
         }
@@ -56,7 +57,9 @@ impl std::fmt::Display for InterfaceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             InterfaceError::TunError => f.debug_struct("InterfaceError::TunError").finish(),
-            InterfaceError::InvalidIpPacket =>f.debug_struct("InterfaceError::InvalidIpPacket").finish()
+            InterfaceError::InvalidIpPacket => {
+                f.debug_struct("InterfaceError::InvalidIpPacket").finish()
+            }
         }
     }
 }

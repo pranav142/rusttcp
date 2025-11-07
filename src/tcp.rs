@@ -1,3 +1,11 @@
+use std::collections::HashMap;
+use std::net::Ipv4Addr;
+
+use crate::parse::ipv4_header_slice::Ipv4HeaderSlice;
+use crate::parse::protocol::Protocol;
+use crate::parse::tcp::{MIN_TCP_HEADER_LENGTH, PsuedoHeader, TcpHeader};
+use crate::parse::tcp_slice::TcpHeaderSlice;
+
 #[derive(Default, Debug)]
 struct SendSeq {
     /// send unacknowledged
@@ -40,7 +48,6 @@ struct TcpConn {
     state: TcpState,
     rcv: RecvSeq,
     snd: SendSeq,
-    rx_buffer: VecDeque<u8>,
 }
 
 impl TcpConn {
@@ -49,25 +56,24 @@ impl TcpConn {
             state: TcpState::Listen,
             rcv: RecvSeq::default(),
             snd: SendSeq::default(),
-            rx_buffer: VecDeque::new(),
         }
     }
 
     // TODO: Need to generate a random ISN
-    fn generate_isn(&self) -> u32 { 
+    fn generate_isn(&self) -> u32 {
         100000
     }
 
     // returns the number of bytes of the tcp response
     // right now we are returning the number of bytes of the TCP response
-    fn on_packet(
+    fn on_packet<'a>(
         &mut self,
-        ip: &Ipv4HeaderSlice<'_>,
-        tcp: &TcpHeaderSlice<'_>,
-    ) -> Option<TcpHeader> {
+        ip: &Ipv4HeaderSlice<'a>,
+        tcp: &TcpHeaderSlice<'a>,
+    ) -> Option<TcpHeader<'a>> {
         match self.state {
             TcpState::Listen => {
-                if !tcp.syn() { 
+                if !tcp.syn() {
                     return None;
                 }
 
@@ -75,7 +81,7 @@ impl TcpConn {
                 let window = 5000;
 
                 self.snd.iss = seq_number;
-                self.snd.una = seq_number; 
+                self.snd.una = seq_number;
                 self.snd.nxt = seq_number + 1;
 
                 self.rcv.irs = tcp.seq_number();
@@ -104,27 +110,26 @@ impl TcpConn {
                     window,
                     psuedo_header,
                     urgent_pointer: 0,
-                    options: &Vec::new(),
-                    data: &Vec::new(),
+                    options: &[],
+                    data: &[],
                 };
 
                 self.state = TcpState::SynRecieved;
 
                 Some(tcp_response)
-            }, 
-            TcpState::SynRecieved => { 
-                if !tcp.ack() { 
+            }
+            TcpState::SynRecieved => {
+                if !tcp.ack() {
                     return None;
                 }
 
-                if tcp.ack_number() != self.snd.nxt { 
+                if tcp.ack_number() != self.snd.nxt {
                     return None;
                 }
 
-                println!("\nEstablishing Connection");
                 self.state = TcpState::Established;
-                None  
-            },
+                None
+            }
             _ => None,
         }
     }
@@ -149,51 +154,27 @@ impl Quad {
     }
 }
 
-struct TcpConnManager {
+pub struct TcpConnManager {
     conns: HashMap<Quad, TcpConn>,
 }
 
 impl TcpConnManager {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             conns: HashMap::new(),
         }
     }
 
-    fn process_packet(
+    pub fn process_packet<'a>(
         &mut self,
-        interface: &Iface,
-        ip: &Ipv4HeaderSlice<'_>,
-        tcp: &TcpHeaderSlice<'_>,
-    ) {
-        let mut response = [0; MTU];
+        ip: &Ipv4HeaderSlice<'a>,
+        tcp: &TcpHeaderSlice<'a>,
+    ) -> Option<TcpHeader<'a>> {
         let quad = Quad::from(ip, tcp);
 
+        // TODO: For now accept all connections
         let connection = self.conns.entry(quad).or_insert(TcpConn::new());
 
-        unsafe {
-            *response.get_unchecked_mut(2) = 8;
-        }
-
-        let Some(tcp_response) = connection.on_packet(ip, tcp) else { 
-            return
-        };
-        
-        let ipv4_header = ip.reply(tcp_response.length());
-
-        ipv4_header.to_buf(&mut response[4..]);
-
-        println!("\nFull Response:\n {:?}", response);
-
-        let tun_result = interface.send(&response);
-        match tun_result {
-            Ok(bytes_sent) => {
-                println!("Successfully sent TCP message (len: {})", bytes_sent);
-            }
-            Err(error) => {
-                println!("Failed to send TCP message: {:?}", error);
-            }
-        }
+        connection.on_packet(ip, tcp)
     }
 }
-

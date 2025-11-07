@@ -1,4 +1,3 @@
-use crate::parse::ipv4_header_slice::Ipv4HeaderSlice;
 use crate::parse::protocol::Protocol;
 use crate::parse::utils::{
     ones_complement_sum, u16_from_buf_unchecked, u16_to_buf_unchecked, u32_to_buf_unchecked,
